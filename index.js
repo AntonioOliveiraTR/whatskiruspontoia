@@ -21,8 +21,8 @@ let qrCodeData = null;
 let isConnected = false;
 let connectedPhone = null;
 let webhookUrl = process.env.WEBHOOK_URL || null;
+let reconnectAttempts = 0;
 
-// Logger silencioso
 const logger = pino({ level: "silent" });
 
 async function startSock() {
@@ -35,6 +35,9 @@ async function startSock() {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, logger),
     },
+    connectTimeoutMs: 60000,
+    defaultQueryTimeoutMs: 0,
+    retryRequestDelayMs: 2000,
   });
 
   sock.ev.on("creds.update", saveCreds);
@@ -46,6 +49,7 @@ async function startSock() {
       console.log("📱 QR Code gerado");
       qrCodeData = await QRCode.toDataURL(qr);
       isConnected = false;
+      reconnectAttempts = 0;
     }
 
     if (connection === "close") {
@@ -53,18 +57,23 @@ async function startSock() {
       const statusCode =
         lastDisconnect?.error?.output?.statusCode;
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+
+      reconnectAttempts++;
+      const delay = Math.min(5000 * reconnectAttempts, 60000);
+
       console.log(
-        `❌ Conexão fechada. Status: ${statusCode}. Reconectando: ${shouldReconnect}`
+        `❌ Conexão fechada. Status: ${statusCode}. Reconectando em ${delay / 1000}s (tentativa ${reconnectAttempts})`
       );
+
       if (shouldReconnect) {
-        setTimeout(startSock, 3000);
+        setTimeout(startSock, delay);
       } else {
-        // Limpa credenciais se deslogou
         if (fs.existsSync(AUTH_DIR)) {
           fs.rmSync(AUTH_DIR, { recursive: true });
         }
         qrCodeData = null;
-        setTimeout(startSock, 3000);
+        reconnectAttempts = 0;
+        setTimeout(startSock, 5000);
       }
     }
 
@@ -72,16 +81,15 @@ async function startSock() {
       console.log("✅ WhatsApp conectado!");
       isConnected = true;
       qrCodeData = null;
+      reconnectAttempts = 0;
       connectedPhone = sock.user?.id?.split(":")[0] || null;
     }
   });
 
-  // Listener de mensagens recebidas
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
 
     for (const msg of messages) {
-      // Ignora mensagens do próprio bot e de status
       if (msg.key.fromMe) continue;
       if (msg.key.remoteJid === "status@broadcast") continue;
 
@@ -95,7 +103,6 @@ async function startSock() {
 
       console.log(`📩 Mensagem de ${from}: ${text}`);
 
-      // Encaminhar para o webhook
       if (webhookUrl) {
         try {
           const resp = await fetch(webhookUrl, {
@@ -117,7 +124,6 @@ async function startSock() {
 
 // ==================== ROTAS ====================
 
-// Health check
 app.get("/", (req, res) => {
   res.json({
     service: "WhatsApp Baileys Server",
@@ -127,7 +133,6 @@ app.get("/", (req, res) => {
   });
 });
 
-// Retorna QR Code ou status de conexão
 app.get("/qr", (req, res) => {
   if (isConnected) {
     return res.json({ connected: true, phone: connectedPhone });
@@ -138,7 +143,6 @@ app.get("/qr", (req, res) => {
   res.json({ connected: false, qr: null, message: "Aguardando QR Code..." });
 });
 
-// Status da conexão
 app.get("/status", (req, res) => {
   res.json({
     connected: isConnected,
@@ -148,7 +152,6 @@ app.get("/status", (req, res) => {
   });
 });
 
-// Configura o webhook URL
 app.post("/set-webhook", (req, res) => {
   const { webhookUrl: url } = req.body;
   if (!url) return res.status(400).json({ error: "webhookUrl is required" });
@@ -157,7 +160,6 @@ app.post("/set-webhook", (req, res) => {
   res.json({ success: true, webhookUrl });
 });
 
-// Envia mensagem
 app.post("/send", async (req, res) => {
   const { to, message } = req.body;
   if (!to || !message) {
@@ -168,7 +170,6 @@ app.post("/send", async (req, res) => {
   }
 
   try {
-    // Normaliza o número (adiciona @s.whatsapp.net se necessário)
     const jid = to.includes("@") ? to : `${to.replace(/\D/g, "")}@s.whatsapp.net`;
     await sock.sendMessage(jid, { text: message });
     console.log(`📤 Mensagem enviada para ${jid}`);
@@ -179,10 +180,9 @@ app.post("/send", async (req, res) => {
   }
 });
 
-// Desconecta o WhatsApp
 app.post("/disconnect", async (req, res) => {
   if (sock) {
-    await sock.logout();
+    try { await sock.logout(); } catch (e) {}
     isConnected = false;
     connectedPhone = null;
     qrCodeData = null;
@@ -190,7 +190,6 @@ app.post("/disconnect", async (req, res) => {
   res.json({ success: true, message: "Disconnected" });
 });
 
-// Força reconexão (gera novo QR)
 app.post("/reconnect", async (req, res) => {
   if (sock) {
     try { sock.end(); } catch (e) {}
@@ -201,6 +200,7 @@ app.post("/reconnect", async (req, res) => {
   isConnected = false;
   connectedPhone = null;
   qrCodeData = null;
+  reconnectAttempts = 0;
   startSock();
   res.json({ success: true, message: "Reconnecting... Check /qr for QR code" });
 });
