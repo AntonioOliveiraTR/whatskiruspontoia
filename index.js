@@ -1,18 +1,4 @@
-const express = require("express");
-const {
-  default: makeWASocket,
-  useMultiFileAuthState,
-  DisconnectReason,
-  makeCacheableSignalKeyStore,
-  fetchLatestBaileysVersion,
-} = require("@whiskeysockets/baileys");
-const pino = require("pino");
-const QRCode = require("qrcode");
-const fs = require("fs");
-const path = require("path");
 
-const app = express();
-app.use(express.json({ limit: "2mb" }));
 
 const PORT = Number(process.env.PORT || 10000);
 const AUTH_DIR = path.join(__dirname, "auth_info");
